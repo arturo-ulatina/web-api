@@ -1,13 +1,33 @@
-import { Injectable } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { Injectable, OnModuleInit } from '@nestjs/common';
+import { SqliteService } from '../sqlite/sqlite.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { User } from './entities/user.entity';
 
-@Injectable()
-export class UsersService {
-  private users: User[] = [];
+// Columns that can be changed through UpdateUserDto
+const UPDATABLE_COLUMNS = ['name', 'email', 'password'] as const;
 
-  create(createUserDto: CreateUserDto) {
+@Injectable()
+export class UsersService implements OnModuleInit {
+  constructor(private readonly sqlite: SqliteService) {}
+
+  // Create the users table on startup if it does not exist yet
+  onModuleInit() {
+    this.sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS user (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        lastname TEXT,
+        email TEXT NOT NULL UNIQUE,
+        password TEXT NOT NULL,
+        age INTEGER,
+        role TEXT NOT NULL DEFAULT 'Reader'
+      )
+    `);
+  }
+
+  async create(createUserDto: CreateUserDto) {
     const { email, name, password } = createUserDto;
 
     // Validate email, name and password
@@ -34,34 +54,31 @@ export class UsersService {
     }
 
     // Validate that the email is not already in use
-    const emailExists = this.users.find((user) => user.email === email);
+    const emailExists = this.sqlite.get<User>(
+      'SELECT id FROM user WHERE email = ?',
+      [email],
+    );
     if (emailExists) {
       throw new Error('Email already exists');
     }
 
-    const role: string = 'Reader';
+    const id = randomUUID();
+    this.sqlite.run(
+      'INSERT INTO user (id, name, email, password, role) VALUES (?, ?, ?, ?, ?)',
+      [id, name, email, password, 'Reader'],
+    );
 
-    // Create an user and generate an ID for him with an UUID
-    const newUser: User = {
-      id: Math.random().toString(36).substring(2, 15),
-      email,
-      name,
-      password,
-      role,
-    };
-
-    // Save the newUser into the users list
-    this.users.push(newUser);
-
-    return newUser;
+    return this.findOne(id);
   }
 
   findAll() {
-    return this.users;
+    return this.sqlite.all<User>('SELECT * FROM user');
   }
 
-  findOne(id: string) {
-    const userExist = this.users.find((user) => user.id === id);
+  async findOne(id: string) {
+    const userExist = this.sqlite.get<User>('SELECT * FROM user WHERE id = ?', [
+      id,
+    ]);
 
     if (!userExist) {
       throw new Error('User not found');
@@ -70,32 +87,29 @@ export class UsersService {
     return userExist;
   }
 
-  update(id: string, updateUserDto: UpdateUserDto) {
-    const userIndex = this.users.findIndex((user) => user.id === id);
+  async update(id: string, updateUserDto: UpdateUserDto) {
+    // Throws if the user does not exist
+    await this.findOne(id);
 
-    if (userIndex === -1) {
-      throw new Error('User not found');
+    const columns = UPDATABLE_COLUMNS.filter(
+      (column) => updateUserDto[column] !== undefined,
+    );
+
+    if (columns.length > 0) {
+      this.sqlite.run(
+        `UPDATE user SET ${columns.map((column) => `${column} = ?`).join(', ')} WHERE id = ?`,
+        [...columns.map((column) => updateUserDto[column] ?? null), id],
+      );
     }
 
-    const updatedUser = {
-      ...this.users[userIndex],
-      ...updateUserDto,
-    };
-
-    this.users[userIndex] = updatedUser;
-
-    return updatedUser;
+    return this.findOne(id);
   }
 
-  remove(id: string) {
-    const userIndex = this.users.findIndex((user) => user.id === id.toString());
+  async remove(id: string) {
+    const user = await this.findOne(id);
 
-    if (userIndex === -1) {
-      throw new Error('User not found');
-    }
+    this.sqlite.run('DELETE FROM user WHERE id = ?', [id]);
 
-    const deletedUser = this.users.splice(userIndex, 1)[0];
-
-    return deletedUser;
+    return user;
   }
 }
